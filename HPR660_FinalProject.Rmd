@@ -1,0 +1,267 @@
+---
+title: "HPR660_FinalProject"
+author: "Julianna Catania"
+date: "7/16/2021"
+output: html_document
+---
+ 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(pROC)
+library(MLeval)
+library(randomForest)
+setwd("/Volumes/Transcend/Penn Master of Public Health Program/Summer 2021 Semester/HPR660")
+HHS_data <- read.csv("HPR660_2018HHSData_AdultModules(clean).csv", na.strings=c("","NA"))
+#beware do not load code below multiple times in same session
+#library(doFuture)
+#registerDoFuture()
+#plan(multisession, workers = availableCores() - 1)
+```
+
+PRE-PROCESSING THE DATA
+
+```{r}
+#recoding asthma to work in cross validation
+HHS_data$asthma <- as.factor(HHS_data$asthma)
+levels(HHS_data$asthma) =c("Yes", "No")
+
+```
+
+```{r}
+#breaking up HHS data into training and test sets with Chester, Montgomery, Philadelphia, and Bucks Counties for training and Delaware for test 
+HHS_data[HHS_data$county != 'Delaware', ] -> HHS_training
+
+HHS_data[HHS_data$county == 'Delaware', ] -> HHS_test
+```
+
+```{r}
+#dropped missing values from training
+HHS_training %>% drop_na() -> HHS_training_clean
+#dropped missing values from test
+HHS_test %>% drop_na() -> HHS_test_clean
+```
+
+```{r}
+#removing county from datasets to avoid being used as a predictor
+HHS_training_clean2 = subset(HHS_training_clean, select = -c(county) )
+HHS_test_clean2 = subset(HHS_test_clean, select = -c(county) )
+
+```
+_____________________________________________________________________
+
+
+Logistic Regression Modeling
+
+# caret - training approach
+
+```{r, eval = FALSE}
+#10 fold cross validation for elastic net model
+set.seed(4325)
+my_control <- trainControl(
+  method = "repeatedcv",
+  number = 10,
+  repeats = 5,
+  verboseIter = TRUE,
+  savePredictions = TRUE, 
+  classProbs = TRUE, 
+  summaryFunction = twoClassSummary)
+``` 
+
+```{r}
+#creating the tuning grid
+grid_en <- expand.grid(alpha = seq(0, 1, by = 0.1),
+            lambda = c(0.001, 0.010, 0.015, 0.020))
+```
+
+
+
+
+```{r, eval = FALSE}
+model_en <- train(as.factor(asthma) ~ sex + diabetes + smoking + bingedrink + cutmeal + exercise + fruits + mentalh + employ + marital + race + npov,
+                   method = 'glmnet',
+                  family = 'binomial',
+                  metric = 'ROC',
+                   tuneGrid = grid_en,
+                   trControl = my_control,
+                   data = HHS_training_clean2,
+                  na.action = na.omit)
+```
+
+```{r}
+#figuring out the optimal alpha and lambda
+plot(model_en)
+```
+
+```{r}
+#make predictions, en model
+preds_train <- predict(model_en, HHS_training_clean2, type = 'prob')[,1]
+preds_test <- predict(model_en, HHS_test_clean2, type = 'prob')[,1]
+```
+
+
+
+```{r, eval = FALSE}
+#caret review predictions, en
+result_test_probs <- data.frame(obs = HHS_test_clean2$asthma, en = preds_test)
+
+ggplot(calibration(obs ~ en, 
+                 class = 'Yes',
+                 data = result_test_probs)) + 
+  geom_line()                                         
+```
+
+
+```{r, eval = FALSE}
+#calibration plot: en model
+
+library(gmish)
+result_test_probs_num <- result_test_probs
+result_test_probs_num$obs <- as.numeric(ifelse(result_test_probs_num$obs == 'Yes', 1, 0))
+calib_plot(obs ~ en, 
+                 data = result_test_probs_num)
+with(result_test_probs_num, make_perf_df(en, 
+                                         obs, 
+                                         metrics = list(brier, sbrier, ici, cstat)))
+```
+
+RANDOM FOREST: 130 TREES
+
+```{r}
+#random forest model, cross validation for 130 trees
+set.seed(4325)
+grid_rf <- data.frame(mtry = 9:13)
+model_rf <- train(x = HHS_training_clean2[,-2], 
+                   y = HHS_training_clean2$asthma,
+                   method = 'rf',
+                   ntree = 130,
+                   tuneGrid = grid_rf,
+                   trControl = my_control)
+plot(model_rf)
+
+```
+
+```{r}
+#make predictions, rf model for 130 trees
+preds_train_rf <- predict(model_rf, HHS_training_clean, type = 'prob')[,1]
+preds_test_rf <- predict(model_rf, HHS_test_clean, type = 'prob')[,1]
+```
+
+```{r, eval = FALSE}
+#caret, review predictions, rf for 130 trees
+result_test_probs_rf <- data.frame(obs_rf = HHS_test_clean2$asthma,
+              rf = preds_test_rf)
+
+ggplot(calibration(obs_rf ~ rf, 
+                 class = 'Yes',
+                 data = result_test_probs_rf)) + 
+  geom_line()
+```
+
+
+
+```{r}
+#gmish, review predictions, rf for 130 trees
+library(gmish)
+result_test_probs_num_rf <- result_test_probs_rf
+result_test_probs_num_rf$obs_rf <- as.numeric(ifelse(result_test_probs_num_rf$obs_rf == 'Yes', 1, 0))
+calib_plot(obs_rf ~ rf, 
+                 data = result_test_probs_num_rf)
+with(result_test_probs_num_rf, make_perf_df(rf, 
+                                         obs_rf, 
+                                         metrics = list(brier, sbrier, ici, cstat)))
+
+```
+RANDOM FOREST: 250 TREES
+
+```{r}
+set.seed(4325)
+#random forest model, cross validation for 250 trees
+model_rf250 <- train(x = HHS_training_clean2[,-2], 
+                   y = HHS_training_clean2$asthma,
+                   method = 'rf',
+                   ntree = 250,
+                   tuneGrid = grid_rf,
+                   trControl = my_control)
+plot(model_rf250)
+```
+
+```{r}
+#make predictions, rf model for 250 trees
+preds_train_rf250 <- predict(model_rf250, HHS_training_clean2, type = 'prob')[,1]
+preds_test_rf250 <- predict(model_rf250, HHS_test_clean2, type = 'prob')[,1]
+```
+
+```{r, eval = FALSE}
+#caret, review predictions, rf for 250 trees
+result_test_probs_rf250 <- data.frame(obs_rf250 = HHS_test_clean2$asthma,
+              rf250 = preds_test_rf250)
+
+ggplot(calibration(obs_rf250 ~ rf250, 
+                 class = 'Yes',
+                 data = result_test_probs_rf250)) + 
+  geom_line()
+```
+
+```{r}
+#gmish, review predictions, rf for 250 trees
+library(gmish)
+result_test_probs_num_rf250 <- result_test_probs_rf250
+result_test_probs_num_rf250$obs_rf250 <- as.numeric(ifelse(result_test_probs_num_rf250$obs_rf250 == 'Yes', 1, 0))
+calib_plot(obs_rf250 ~ rf250, 
+                 data = result_test_probs_num_rf250)
+with(result_test_probs_num_rf250, make_perf_df(rf250, 
+                                         obs_rf250, 
+                                         metrics = list(brier, sbrier, ici, cstat)))
+```
+
+RANDOM FOREST: 500 TREES
+```{r}
+#random forest model, cross validation for 500 trees
+model_rf500 <- train(x = HHS_training_clean2[,-2], 
+                   y = HHS_training_clean2$asthma,
+                   method = 'rf',
+                   ntree = 500,
+                   tuneGrid = grid_rf,
+                   trControl = my_control)
+plot(model_rf500)
+```
+
+```{r}
+#make predictions, rf model for 500 trees
+preds_train_rf500 <- predict(model_rf500, HHS_training_clean2, type = 'prob')[,1]
+preds_test_rf500 <- predict(model_rf500, HHS_test_clean2, type = 'prob')[,1]
+```
+
+```{r, eval = FALSE}
+#caret, review predictions, rf for 500 trees
+result_test_probs_rf500 <- data.frame(obs_rf500 = HHS_test_clean2$asthma,
+              rf500 = preds_test_rf500)
+
+ggplot(calibration(obs_rf500 ~ rf500, 
+                 class = 'Yes',
+                 data = result_test_probs_rf500)) + 
+  geom_line()
+```
+
+```{r}
+#gmish, review predictions, rf for 500 trees
+library(gmish)
+result_test_probs_num_rf500 <- result_test_probs_rf500
+result_test_probs_num_rf500$obs_rf500 <- as.numeric(ifelse(result_test_probs_num_rf500$obs_rf500 == 'Yes', 1, 0))
+calib_plot(obs_rf500 ~ rf500, 
+                 data = result_test_probs_num_rf500)
+with(result_test_probs_num_rf500, make_perf_df(rf500, 
+                                         obs_rf500, 
+                                         metrics = list(brier, sbrier, ici, cstat)))
+```
+
+
+
+
+
+
+
+
